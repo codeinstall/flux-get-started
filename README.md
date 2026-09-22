@@ -61,220 +61,165 @@ Your feedback is always welcome!
 
 
 
+# Shared S3 Storage for PDF Generation
 
-# S3 Storage Design for Three Applications Across Two Buckets
+## Overview
 
-This document defines the proposed S3 storage configuration for Atlas Portal, Beacon Processor and Cedar Reports. It records where data is stored, how each application accesses it, the permissions assigned to each role and how data is retained and removed.
+The PDF service uses two S3 buckets. `shared-events` stores PDFs generated for RAP-app or requested by a user. These files expire after 28 days. `shared-doc-template` stores the document templates used to generate the PDFs. Templates are retained indefinitely with no automatic expiry.
 
-**Template status:** All application names, resource identifiers, owners and retention periods below are fictional examples. They describe a proposed configuration, not deployed resources. Replace them and approve the outstanding decisions before implementation.
+This document defines the production storage design for RAP-app and the two connected applications. Values in angle brackets identify environment details that must be supplied from the deployment configuration.
 
-## Document control
-
-| Field | Value |
+| Document detail | Value |
 |---|---|
-| Status | Draft for technical review |
-| Version | 0.2 |
-| Environment | Production example |
-| Document owner | Platform Engineering |
-| Service owner | Example Digital Services |
-| Technical approver | Technical Design Authority |
-| Security reviewer | Cloud Security Team |
-| Data retention approver | Data Owner |
-| Jira epic | CLOUD-1000 |
-| Implementation ticket | CLOUD-1001 |
-| Confluence parent page | Cloud Platform / Storage |
-| Review frequency | Every six months and after material changes |
+| Service | PDF generation and document storage |
+| Environment | Production |
+| Service owner | `<SERVICE_OWNER>` |
+| Platform owner | `<PLATFORM_OWNER>` |
+| AWS account | `<AWS_ACCOUNT_ID>` |
+| AWS region | `<AWS_REGION>` |
+| Jira reference | `<JIRA_REFERENCE>` |
+| Infrastructure repository | `<REPOSITORY_URL>` |
 
-## 1 Scope and design
+## Bucket configuration
 
-Use two S3 general purpose buckets. Bucket A holds Atlas Portal data under `atlas/` and Beacon Processor data under `beacon/`. Bucket B holds Cedar Reports data under `cedar/`. This application-to-bucket mapping is illustrative and can be replaced with the actual mapping. Each application receives its own S3 access point and IAM role. Application access is limited to its assigned prefix. Cross-application access is excluded from this example and requires a separate approved permission change.
-
-This example assumes the workloads run in an AWS VPC in the same account and region as both buckets. Development and test use separate resources and roles. If the workloads run in an external OpenShift cluster, confirm connectivity and workload identity before adopting the VPC-only access model.
-
-Prefixes provide logical separation between Atlas and Beacon within Bucket A. Bucket-level settings and administrative changes to Bucket A affect both applications. Cedar uses Bucket B with separate bucket policies, lifecycle configuration and encryption key. Revisit the Atlas and Beacon sharing decision if they need different ownership, isolation or recovery requirements.
-
-## 2 Bucket configuration
-
-| Setting | Bucket A | Bucket B |
+| Setting | shared-events | shared-doc-template |
 |---|---|---|
-| Purpose | Application uploads and processing data | Reports and exports |
-| Applications | Atlas Portal and Beacon Processor | Cedar Reports |
-| Bucket name | `example-digital-prod-app-data-123456789012` | `example-digital-prod-reports-123456789012` |
-| Bucket ARN | `arn:aws:s3:::example-digital-prod-app-data-123456789012` | `arn:aws:s3:::example-digital-prod-reports-123456789012` |
-| Region | `eu-west-2` / London | `eu-west-2` / London |
-| Prefixes | `atlas/` and `beacon/` | Bucket B / `cedar/` |
-| Access points | `atlas-prod-ap` and `beacon-prod-ap` | `cedar-prod-ap` |
-| KMS key alias | `alias/example-prod-app-data` | `alias/example-prod-reports` |
-| KMS key ARN | `<BUCKET_A_KMS_KEY_ARN>` | `<BUCKET_B_KMS_KEY_ARN>` |
+| Purpose | Generated PDF files | Source templates for PDF generation |
+| Bucket ARN | `arn:aws:s3:::shared-events` | `arn:aws:s3:::shared-doc-template` |
+| Region | `<AWS_REGION>` | `<AWS_REGION>` |
+| Retention | 28 days | Indefinite |
+| Automatic object expiry | Enabled at 28 days | Disabled |
+| Storage class | S3 Standard | S3 Standard |
+| Versioning design | Unversioned storage for temporary PDFs | Enabled to preserve template history |
+| Encryption | SSE-KMS | SSE-KMS |
+| KMS key ARN | `<EVENTS_KMS_KEY_ARN>` | `<TEMPLATE_KMS_KEY_ARN>` |
+| S3 access point ARN | `<EVENTS_ACCESS_POINT_ARN>` | `<TEMPLATE_ACCESS_POINT_ARN>` |
+| S3 access point alias | `<EVENTS_ACCESS_POINT_ALIAS>` | `<TEMPLATE_ACCESS_POINT_ALIAS>` |
+| Public access | Blocked | Blocked |
+| Object ownership | Bucket owner enforced | Bucket owner enforced |
+| ACLs | Disabled | Disabled |
 
-The following baseline applies independently to both buckets.
+The bucket names above are the service identifiers. If environment naming adds a prefix or suffix then record the deployed names as `<EVENTS_BUCKET_NAME>` and `<TEMPLATE_BUCKET_NAME>` with their corresponding ARNs in the application configuration.
 
-| Setting | Example value or required configuration |
+## PDF generation and retrieval
+
+1. RAP-app or a connected application receives a PDF generation request and checks that the user can access the requested data.
+2. The generating service reads the required template from `shared-doc-template` using its workload role.
+3. The service generates the PDF and saves it to its allocated prefix in `shared-events`.
+4. The application records the object key and creation time against the request. It returns the PDF through an authenticated download route or a short-lived presigned URL.
+5. The application stops serving the file once its 28-day retention period has ended. S3 lifecycle processing removes the stored object.
+
+Generated PDFs use unique object keys. Regeneration creates a new object rather than overwriting the previous file. This keeps each file's creation time and expiry clear.
+
+End users do not receive AWS credentials. The application checks ownership before issuing a download. Presigned URLs must use a reachable endpoint and expire within `<DOWNLOAD_URL_TTL>`. They must not remain usable beyond the PDF's application expiry time.
+
+## Application access
+
+Each application uses a separate IAM role. PDF access is restricted to its allocated prefix. Template access is read-only and limited to the templates assigned to that application. Shared templates can be included in more than one role's allowed template scope.
+
+| Application | Workload role ARN | shared-events scope | shared-doc-template scope |
+|---|---|---|---|
+| RAP-app | `<RAP_APP_ROLE_ARN>` | Read and write under `<RAP_PDF_PREFIX>` | Read under `<RAP_TEMPLATE_PREFIX>` |
+| `<APPLICATION_2_NAME>` | `<APPLICATION_2_ROLE_ARN>` | `<APPLICATION_2_PDF_ACCESS_AND_PREFIX>` | `<APPLICATION_2_TEMPLATE_READ_PREFIX>` |
+| `<APPLICATION_3_NAME>` | `<APPLICATION_3_ROLE_ARN>` | `<APPLICATION_3_PDF_ACCESS_AND_PREFIX>` | `<APPLICATION_3_TEMPLATE_READ_PREFIX>` |
+
+The access scope for each connected application determines which permissions below are attached to its role. A read-only consumer receives no PDF write permissions. Access to another application's PDFs requires an explicit entry in the role policy.
+
+### Role permissions
+
+| Role function | S3 permissions | KMS permissions | Resource boundary |
+|---|---|---|---|
+| PDF generation | `s3:PutObject` and `s3:GetObject` on PDFs plus `s3:GetObject` on templates | `kms:GenerateDataKey` and `kms:Decrypt` on the events key plus `kms:Decrypt` on the template key | Assigned PDF and template prefixes |
+| PDF retrieval | `s3:GetObject` | `kms:Decrypt` on the events key | Assigned PDF prefix |
+| Template publishing through `<TEMPLATE_PUBLISHER_ROLE_ARN>` | `s3:PutObject` and `s3:GetObject` | `kms:GenerateDataKey` and `kms:Decrypt` on the template key | Approved template prefixes |
+| Template recovery through `<TEMPLATE_RECOVERY_ROLE_ARN>` | `s3:GetObjectVersion` and `s3:PutObject` | `kms:Decrypt` and `kms:GenerateDataKey` on the template key | Template versions covered by the recovery request |
+| Infrastructure deployment through `<DEPLOYMENT_ROLE_ARN>` | Bucket configuration and access point administration | Key administration under the platform key policy | The two buckets and their supporting resources |
+
+Object listing is granted only where the application requires it. Scope `s3:ListBucket` to the appropriate access point with an `s3:prefix` condition. Services that use known object keys do not need listing access.
+
+Where multipart uploads are used grant `s3:AbortMultipartUpload` and `s3:ListMultipartUploadParts` on the writer's assigned prefix. Application roles have no object deletion, version deletion, template publishing or bucket administration permissions.
+
+The deployment role has no routine access to document contents. Template publishing and recovery remain separate from normal application access.
+
+## Access points and network controls
+
+The events access point attaches to `shared-events`. The template access point attaches to `shared-doc-template`. Their policies identify the permitted role ARNs and object prefixes. The bucket policies permit these access points and restrict application access through other paths.
+
+Both the access point and the underlying bucket must allow the request. An access point policy alone does not prevent access through the bucket endpoint. This restriction must also be enforced at bucket level. See [AWS access point policies](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-points-policies.html).
+
+| Network setting | Deployment value |
 |---|---|
-| AWS account name | example-digital-prod |
-| AWS account ID | `123456789012` |
-| Region | `eu-west-2` / London |
-| Initial storage class | S3 Standard |
-| Versioning | Enabled |
-| Encryption | SSE-KMS with a separate customer managed key for each bucket |
-| Public access | Block all public access at account, bucket and access point levels |
-| Object ownership | Bucket owner enforced with ACLs disabled |
-| Transport | HTTPS required |
-| VPC | `<PRODUCTION_VPC_ID>` |
-| S3 VPC endpoint | `<S3_VPC_ENDPOINT_ID>` |
-| Replication | Not configured in this example; recovery requirement TBC |
-| Object Lock | Not configured in this example; immutable retention requirement TBC |
-| Infrastructure code | `<REPOSITORY_URL>` / `terraform/storage/` |
+| Application runtime | `<APPLICATION_RUNTIME>` |
+| Access point network origin | `<ACCESS_POINT_NETWORK_ORIGIN>` |
+| Permitted VPC where applicable | `<VPC_ID>` |
+| S3 endpoint where applicable | `<S3_VPC_ENDPOINT_ID>` |
+| Approved network path | `<APPROVED_S3_NETWORK_PATH>` |
+| Workload identity provider | `<WORKLOAD_IDENTITY_PROVIDER>` |
 
-Required resource tags: `Environment=prod`, `Service=example-digital`, `Owner=platform-engineering`, `CostCentre=CC1000`, `DataClassification=internal-example` and `ManagedBy=terraform`. The classification must be confirmed against the actual data.
+The network path must support the actual application runtime. A VPC-only access point requires connectivity through its configured VPC. Where users cannot reach that path the application streams the PDF through its authenticated download route.
 
-## 3 Application access mapping
+All requests use HTTPS. Workloads use temporary role credentials through the platform identity integration. Role trust is restricted to the exact workload identity. Static AWS access keys are not stored in application configuration.
 
-| Application | Bucket | Data stored | Prefix | S3 access point | IAM role | Access |
-|---|---|---|---|---|---|---|
-| Atlas Portal | Bucket A | User uploads and supporting files | Bucket A / `atlas/` | `atlas-prod-ap` | `atlas-prod-s3-role` | List, read and write |
-| Beacon Processor | Bucket A | Processing inputs and outputs | Bucket A / `beacon/` | `beacon-prod-ap` | `beacon-prod-s3-role` | List, read, write and delete |
-| Cedar Reports | Bucket B | Generated reports and exports | Bucket B / `cedar/` | `cedar-prod-ap` | `cedar-prod-s3-role` | List, read and write |
+## Retention and lifecycle
 
-Bucket A and Bucket B refer to the exact bucket names in section 2. Each access point is attached to its application's assigned bucket. No application can list or access another application's prefix or the other bucket. Atlas and Cedar rely on lifecycle rules for scheduled deletion. Beacon can delete current objects because its example workflow includes temporary processing data.
+### shared-events
 
-### Access point identifiers
+Apply an enabled lifecycle rule to all generated PDFs with expiration set to 28 days after object creation. There are no exclusions for application prefixes. Abort incomplete multipart uploads after seven days.
 
-| Application | Access point ARN | Network origin |
-|---|---|---|
-| Atlas Portal | `arn:aws:s3:eu-west-2:123456789012:accesspoint/atlas-prod-ap` | VPC / `<PRODUCTION_VPC_ID>` |
-| Beacon Processor | `arn:aws:s3:eu-west-2:123456789012:accesspoint/beacon-prod-ap` | VPC / `<PRODUCTION_VPC_ID>` |
-| Cedar Reports | `arn:aws:s3:eu-west-2:123456789012:accesspoint/cedar-prod-ap` | VPC / `<PRODUCTION_VPC_ID>` |
+The production design uses unversioned storage for this bucket so expired PDFs do not remain as noncurrent versions. If the deployed bucket already has versioning enabled or suspended then existing versions must be assessed and a version cleanup configuration agreed before the 28-day retention control is accepted. Suspending versioning does not remove historical versions.
 
-Applications use their access point ARN or the AWS-generated access point alias in the SDK bucket parameter where supported. Record the generated aliases in deployment configuration. Do not construct an alias manually. Configure the AWS region as `eu-west-2` and confirm SDK support during integration testing.
+S3 lifecycle deletion is asynchronous. Applications enforce the 28-day availability limit using the recorded creation time rather than waiting for physical deletion. The lifecycle rule is a storage cleanup control and does not guarantee deletion at an exact hour. See [AWS lifecycle configuration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html).
 
-An S3 access point provides an application-specific policy boundary. The VPC endpoint provides the network route to S3. Both must be configured for the intended access path.
+Generated PDFs are not retained in a separate long-term archive. Any replica or backup containing these files must follow the same retention requirement. Files removed after expiry are no longer available for recovery from this bucket.
 
-## 4 IAM roles and permissions
+### shared-doc-template
 
-Role ARNs follow `arn:aws:iam::123456789012:role/<ROLE_NAME>` using the names in section 3.
+Templates never expire automatically. Do not configure current-version expiry or noncurrent-version expiry for this bucket. Retain template history so an earlier version can be restored after a failed release.
 
-| Permission | Atlas role | Beacon role | Cedar role | Scope |
-|---|---|---|---|---|
-| `s3:ListBucket` | Allow | Allow | Allow | Own access point with an `s3:prefix` condition |
-| `s3:GetObject` | Allow | Allow | Allow | Own prefix through own access point |
-| `s3:PutObject` | Allow | Allow | Allow | Own prefix through own access point |
-| `s3:DeleteObject` | No grant | Allow | No grant | Beacon prefix only |
-| `s3:AbortMultipartUpload` | Allow | Allow | Allow | Own prefix only |
-| `s3:ListMultipartUploadParts` | Allow | Allow | Allow | Own prefix only |
-| `s3:GetObjectVersion` | No grant | No grant | No grant | Recovery role only |
-| `s3:DeleteObjectVersion` | No grant | No grant | No grant | Approved maintenance role only |
-| Bucket, lifecycle and access point administration | No grant | No grant | No grant | Infrastructure deployment role |
-| `kms:GenerateDataKey` | Allow | Allow | Allow | Assigned bucket KMS key only |
-| `kms:Decrypt` | Allow | Allow | Allow | Assigned bucket KMS key only |
+Only the template publishing role can update templates. Applications use an explicit template release key so a new publication does not silently change existing generation requests. Record the template release used against each generated PDF.
 
-For object actions, scope resources to the access point object ARN, for example `arn:aws:s3:eu-west-2:123456789012:accesspoint/atlas-prod-ap/object/atlas/*`. Scope listing to the access point ARN and limit requested prefixes to `atlas/` and `atlas/*`. Apply the equivalent restrictions for Beacon and Cedar.
+Indefinite retention does not make objects immutable. Application and publishing roles cannot delete templates or their historical versions. Any permanent removal requires a separately authorised maintenance role and a recorded change. Aborting incomplete multipart uploads after seven days is permitted because incomplete uploads are not retained templates.
 
-“No grant” describes the intended effective access. Review all attached policies, resource policies and permission boundaries to ensure another policy does not grant the action.
+## Encryption and auditing
 
-### Workload identity and trust
+Each bucket uses its assigned customer managed KMS key. Writer roles can generate data keys. Reader roles can decrypt only with the relevant key. S3 policies still restrict the accessible object prefixes.
 
-Use temporary credentials through the approved workload identity integration. Do not place long-lived AWS access keys in application configuration. For an OIDC-based integration, restrict each role trust policy to the approved issuer, audience and exact workload subject.
+Enable CloudTrail data events for document reads and writes in both buckets. Record changes to bucket policies, access points, lifecycle rules and KMS configuration. Send audit records to `<CENTRAL_AUDIT_DESTINATION>` under `<AUDIT_RETENTION_POLICY>`.
 
-| Application | Example workload subject | Identity provider |
-|---|---|---|
-| Atlas Portal | `system:serviceaccount:atlas-prod:atlas-portal` | `<OIDC_PROVIDER_ARN>` |
-| Beacon Processor | `system:serviceaccount:beacon-prod:beacon-worker` | `<OIDC_PROVIDER_ARN>` |
-| Cedar Reports | `system:serviceaccount:cedar-prod:cedar-reports` | `<OIDC_PROVIDER_ARN>` |
+Monitor failed PDF uploads, failed template reads, access denials and unexpected storage growth. Alert on changes to public access settings or retention rules. Route operational alerts to `<OPERATIONS_ALERT_DESTINATION>`.
 
-Use the trust policy required by the selected runtime integration. Confirm credential acquisition and rotation before granting data access.
+Logs include the application identity and request ID. They must not contain document contents, credentials or presigned URLs.
 
-### Policy responsibilities
+## Operations and recovery
 
-The role policy, access point policy, bucket policy, endpoint policy and KMS key policy must support the same intended request. Bucket A must permit the Atlas and Beacon access points. Bucket B must permit the Cedar access point. Apply the appropriate bucket policy separately to each bucket. Access point restrictions alone do not block direct bucket access, so separately restrict application data access to the intended path. Preserve explicitly approved service and operational access. See [AWS access point policy guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-points-policies.html).
+Platform Engineering owns bucket configuration, IAM policies, lifecycle controls and encryption. Application teams own template selection, PDF generation, user authorisation and download expiry. `<TEMPLATE_OWNER>` owns template releases and recovery decisions.
 
-Grant Atlas and Beacon KMS permissions on `<BUCKET_A_KMS_KEY_ARN>` only. Grant Cedar KMS permissions on `<BUCKET_B_KMS_KEY_ARN>` only. Restrict each key to the approved S3 service context. Validate any encryption-context conditions against the chosen S3 Bucket Key setting. Encryption permissions do not replace S3 prefix restrictions.
+Template recovery restores an approved historical version through the recovery role. Regional recovery and independent backup arrangements are recorded in `<TEMPLATE_RECOVERY_RUNBOOK>` with recovery objectives `<TEMPLATE_RPO>` and `<TEMPLATE_RTO>`. Versioning alone is not an independent backup.
 
-### Operational roles
+Manage both buckets and their policies through `<REPOSITORY_URL>`. Protect buckets and KMS keys from accidental destruction in the deployment workflow. Changes to retention, template deletion or access scope require review through `<CHANGE_PROCESS>`.
 
-| Role | Purpose | Boundary |
-|---|---|---|
-| `storage-deploy-role` | Manage both buckets, access points and lifecycle through infrastructure code | Approved pipeline; no routine object access |
-| `storage-recovery-role` | Read previous versions and restore approved objects | Temporary access to the affected prefix with a recorded ticket |
-| `storage-maintenance-role` | Permanently remove approved object versions | Time-limited access and explicit approval |
-| `storage-audit-role` | Review configuration and audit records | No application payload access |
+## Production verification
 
-## 5 Retention and lifecycle
-
-**The periods below are illustrative business values.** They are not legal requirements or an approved retention schedule. The Data Owner must approve each period before the rules are enabled.
-
-| Bucket and data scope | Current object expiry | Noncurrent version expiry | Storage transition | Owner |
-|---|---|---|---|---|
-| Bucket A / `atlas/` | 365 days after creation | 30 days after becoming noncurrent | None in initial example | Atlas Product Owner |
-| Bucket A / `beacon/` | 90 days after creation | 7 days after becoming noncurrent | None in initial example | Beacon Service Owner |
-| Bucket B / `cedar/` | 180 days after creation | 30 days after becoming noncurrent | None in initial example | Cedar Product Owner |
-
-Configure Atlas and Beacon lifecycle rules on Bucket A and Cedar lifecycle rules on Bucket B. Apply prefix-filtered lifecycle rules independently in each bucket. Abort incomplete multipart uploads after seven days. Configure removal of expired delete markers where appropriate.
-
-In a versioned bucket, current-version expiration normally creates a delete marker. Previous versions require their own expiry rule. Noncurrent retention is measured from when a version becomes noncurrent, so the example periods do not represent a strict maximum age for every stored byte. Lifecycle deletion is asynchronous. See [AWS lifecycle configuration guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html).
-
-An application delete permission does not enforce minimum retention. If data must be protected against early deletion or overwriting, define and approve an Object Lock design separately. Backups, replicas and exported copies need their own approved retention rules.
-
-## 6 Monitoring and audit
-
-Enable CloudTrail S3 data events for both buckets and the required application object operations and record configuration changes. Send audit records to a separate central logging destination with access and retention controlled by the security team. Example audit retention is 365 days, subject to approval.
-
-Monitor access-denied responses, unusual delete activity, bucket growth, request failures and changes to public access, encryption or lifecycle configuration. Record the alert destination as `<OPERATIONS_ALERT_CHANNEL>` and the dashboard as `<STORAGE_DASHBOARD_URL>`.
-
-Application logs should include request IDs and operation outcomes without recording credentials or sensitive object contents. Platform Engineering owns storage alerts. Application teams own failed business operations and retries.
-
-## 7 Recovery and support
-
-Versioning supports recovery from accidental changes within the retained version window. It does not provide an independent backup or regional recovery plan. The service owner must confirm whether separate backups or replication are required.
-
-| Recovery requirement | Placeholder |
+| Check | Required result |
 |---|---|
-| Recovery point objective | `<APPROVED_RPO>` |
-| Recovery time objective | `<APPROVED_RTO>` |
-| Backup or replication decision | `<DECISION_AND_TICKET>` |
-| Recovery runbook | `<RUNBOOK_URL>` |
-| Escalation contact | `<PLATFORM_SUPPORT_CONTACT>` |
+| Generate a PDF from an authorised template | PDF saved to the correct shared-events prefix |
+| Download through RAP-app | Authorised user receives the correct PDF |
+| Request another user's PDF | Rejected by the application |
+| Access an unassigned prefix | Rejected by S3 |
+| Update a template using an application role | Rejected |
+| Delete an object using an application role | Rejected |
+| Use an unapproved role or network path | Rejected |
+| Request a PDF after 28 days | Rejected by the application |
+| Inspect events lifecycle and version state | All PDFs covered by 28-day expiry with no unhandled historical versions |
+| Inspect template lifecycle | No automatic expiry for current or historical template versions |
+| Restore a template version | Approved version restored and generation verified |
+| Review encryption and audit records | Expected KMS keys used and required access events recorded |
 
-For object recovery, identify the affected bucket, key and version, request temporary recovery access, restore the approved version and ask the application owner to validate the result. Attach the outcome to the incident ticket. Complete a restore test before production approval.
+Record verification evidence under `<JIRA_REFERENCE>` and link the operational runbook at `<RUNBOOK_URL>`.
 
-## 8 Validation and acceptance
 
-| Test | Expected result | Evidence |
-|---|---|---|
-| Each application assumes its own role | Temporary credentials issued only to the approved workload | `<TEST_LINK>` |
-| List, upload and read within own prefix | Successful through the assigned access point | `<TEST_LINK>` |
-| Access another application's prefix or access point | Denied | `<TEST_LINK>` |
-| Access the other bucket or its KMS key as an application | Denied | `<TEST_LINK>` |
-| Direct bucket access by application roles | Denied by the configured access boundary | `<TEST_LINK>` |
-| Delete as Atlas or Cedar | Denied | `<TEST_LINK>` |
-| Delete as Beacon | Allowed only within `beacon/` | `<TEST_LINK>` |
-| Permanently delete a version as an application | Denied | `<TEST_LINK>` |
-| Upload and retrieve encrypted objects | Correct KMS key used; unauthorised key use denied | `<TEST_LINK>` |
-| Public or unapproved network access | Denied | `<TEST_LINK>` |
-| Multipart upload and abort | Successful within the assigned prefix | `<TEST_LINK>` |
-| Lifecycle configuration | Prefixes and current/noncurrent rules match approved retention | `<TEST_LINK>` |
-| Audit trail and alerts | Required operations recorded and test alert received | `<TEST_LINK>` |
-| Restore a previous object version | Application owner confirms recovery | `<TEST_LINK>` |
 
-## 9 Implementation and change control
 
-Track delivery under `CLOUD-1001` with linked tasks for resource creation, workload identity, policy review, application configuration, retention approval and validation evidence. Store all resource definitions and policies in the infrastructure repository.
 
-Deploy and test in a non-production environment first. Review the infrastructure plan before production changes. Treat deletion, lifecycle shortening and KMS key removal as separate changes requiring impact review. Protect both buckets and their keys from accidental destruction in the deployment workflow.
 
-Rollback should restore the last approved policy and application configuration. Reverting infrastructure code cannot recover permanently deleted data. Confirm the recovery path before enabling destructive lifecycle changes.
-
-## 10 Outstanding decisions and approvals
-
-| Item | Responsible owner | Status |
-|---|---|---|
-| Replace account, bucket, access point and role placeholders | Platform Engineering | TBC |
-| Confirm the two-bucket mapping and Atlas and Beacon prefix isolation | Technical Design Authority | TBC |
-| Confirm workload location, identity and network path | Platform and Application Teams | TBC |
-| Approve permissions including Beacon deletion | Application Owners and Security | TBC |
-| Confirm classification and retention periods | Data Owner | TBC |
-| Confirm KMS ownership and key recovery arrangements | Cloud Security Team | TBC |
-| Agree backup, replication, RPO and RTO | Service Owner | TBC |
-| Complete validation and attach evidence | Platform Engineering | TBC |
-| Approve production implementation | Change Owner | TBC |
 
