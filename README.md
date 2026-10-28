@@ -1,167 +1,93 @@
-```
-#!/usr/bin/env python3
-"""Run: python3 app.py. Open http://localhost:8080/tell-dwp-about-change."""
+Add msa-fragment-assessment after code-analysis. We can use a separate render job so the existing kube-score job stays unchanged.
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+1. Update gitlab-ci/stages.yaml:
+stages:
+  - unit-test
+  - code-test
+  - code-analysis
+  - msa-fragment-assessment
+  - build
+  - security-static-analysis
+  - security-dynamic-analysis
+  - install
+  - publish
+  - deploy-dev
+  - deploy-test
+  - deploy-stage
+  - deploy-prod
+  - integration-test
 
-PATH = "/tell-dwp-about-change"
+2. Add the fragment to the existing include list in .gitlab-ci.yml:
+  - project: 'dwp/engineering/stage-gate-automation/msa-assessment-tool'
+    ref: approved
+    file: '/msa-conftest-fragment.yml'
 
+3. Add these jobs to .gitlab-ci.yml:
+# Render the chart for assessment without deploying it.
+msa-render:
+  stage: code-analysis
+  extends: .kube-score
+  parallel:
+    matrix:
+      - ENVIRONMENT: [dev, test]
+  variables:
+    ACCOUNT_ID_EKS2: ''
+  script:
+    - |
+      set -eu
 
-def page(title, content):
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-  <style>
-    body {{ font: 20px/1.5 system-ui, sans-serif; color: #17212b;
-            max-width: 760px; margin: 64px auto; padding: 0 24px; }}
-    h1 {{ line-height: 1.2; }}
-    button {{ background: #00703c; color: white; border: 0;
-              padding: 12px 24px; font: inherit; cursor: pointer; }}
-    code {{ background: #eee; padding: 2px 6px; }}
-    a {{ color: #005ea5; }}
-  </style>
-</head>
-<body><main>{content}</main></body>
-</html>""".encode("utf-8")
+      helm repo add \
+        --username gitlab-ci-token \
+        --password "${CI_JOB_TOKEN}" \
+        hcs-helm-charts \
+        "${CI_API_V4_URL}/projects/3913/packages/helm/stable"
 
+      helm repo update
 
-class Handler(BaseHTTPRequestHandler):
-    def respond(self, status, title, content):
-        body = page(title, content)
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+      mkdir -p "msa-rendered/${ENVIRONMENT}"
 
-    def do_GET(self):
-        if urlsplit(self.path).path != PATH:
-            self.respond(404, "Not found", "<h1>Page not found</h1>")
-            return
-        self.respond(200, "Tell DWP about a change", f"""
-          <h1>Tell DWP about a change</h1>
-          <p>This page returned HTTP <strong>200</strong>.</p>
-          <p>Click the button to render an error at the same URL.</p>
-          <form method="post" action="{PATH}">
-            <button type="submit">Show 500 error</button>
-          </form>
-        """)
+      helm template "${SERVICE_NAME}" \
+        hcs-helm-charts/generic-service \
+        --version "${GENERIC_SERVICE_HELM_CHART_VERSION}" \
+        --namespace "${NAMESPACE}" \
+        --values "values/pdu-${ENVIRONMENT}-values.yaml" \
+        --set-string deployment.containers.main.image.tag="${IMAGE_TAG}" \
+        --set-string deployment.containers.main.image.repository="${ECR_REPOSITORY}" \
+        > "msa-rendered/${ENVIRONMENT}/app.yaml"
 
-    def do_POST(self):
-        if urlsplit(self.path).path != PATH:
-            self.respond(404, "Not found", "<h1>Page not found</h1>")
-            return
-        self.respond(500, "Sorry, there is a problem with the service", f"""
-          <h1>Sorry, there is a problem with the service</h1>
-          <p>This page returned HTTP <strong>500</strong>.</p>
-          <p>The browser URL is still <code>{PATH}</code>.</p>
-          <p>This is a separate error template rendered by the same handler.</p>
-          <p><a href="{PATH}">Return to the normal page</a></p>
-        """)
+      test -s "msa-rendered/${ENVIRONMENT}/app.yaml"
+  artifacts:
+    paths:
+      - msa-rendered/
+    expire_in: 7 days
+  allow_failure: true
 
+# Run the supplied MSA checks separately for each environment.
+msa-compliance-check:
+  stage: msa-fragment-assessment
+  parallel:
+    matrix:
+      - ENVIRONMENT: [dev, test]
+  needs:
+    - job: msa-render
+      artifacts: true
+  variables:
+    MSA_TARGET_DIR: "msa-rendered/${ENVIRONMENT}"
+    MSA_FAIL_ON_WARN: "false"
+  allow_failure: true
 
-if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", 8080), Handler)
-    print(f"Open http://localhost:8080{PATH}", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+# Disable the fragment's optional notification job for now.
+msa-slack-notify:
+  rules:
+    - when: never
 
-```
+The render job reuses .kube-score’s tooling image but replaces its script. Both rendered environment folders are downloaded by each MSA job, but each job assesses only its own environment directory.
 
+This gives you:
+- Separate dev and test assessments.
+- The chart version, release name, namespace and image settings from your pipeline.
+- A conftest-report.json artifact in each assessment job.
+- Non-blocking MSA jobs during initial integration.
+Before merging: validate the combined configuration in GitLab CI Lint and run a branch pipeline. Check that both assessments actually process manifests rather than skip. The runner needs access to the fragment’s CI image and its job token must be able to clone the policy repository.
 
-```
-#!/usr/bin/env python3
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
-
-PATH = "/tell-dwp-about-change"
-
-
-def page(title, content):
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-  <style>
-    body {{ font: 20px/1.5 system-ui, sans-serif; color: #17212b;
-            max-width: 760px; margin: 64px auto; padding: 0 24px; }}
-    h1 {{ line-height: 1.2; }}
-    button {{ background: #00703c; color: white; border: 0;
-              padding: 12px 24px; font: inherit; cursor: pointer; }}
-    code {{ background: #eee; padding: 2px 6px; }}
-    a {{ color: #005ea5; }}
-  </style>
-</head>
-<body><main>{content}</main></body>
-</html>""".encode("utf-8")
-
-
-class Handler(BaseHTTPRequestHandler):
-    def respond(self, status, title, content):
-        body = page(title, content)
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if urlsplit(self.path).path == "/500":
-            self.respond(500, "Sorry, there is a problem with the service", f"""
-              <h1>Sorry, there is a problem with the service</h1>
-              <p>This page returned HTTP <strong>500</strong>.</p>
-              <p>The browser URL has changed to <code>/500</code>.</p>
-              <p>Refresh repeats GET /500 and stays on this error page.</p>
-              <p><a href="{PATH}">Return to the normal page</a></p>
-            """)
-            return
-        if urlsplit(self.path).path != PATH:
-            self.respond(404, "Not found", "<h1>Page not found</h1>")
-            return
-        self.respond(200, "Tell DWP about a change", f"""
-          <h1>Tell DWP about a change</h1>
-          <p>This page returned HTTP <strong>200</strong>.</p>
-          <p>Click the button to redirect to a separate error URL.</p>
-          <form method="post" action="{PATH}">
-            <button type="submit">Redirect to 500 error</button>
-          </form>
-        """)
-
-    def do_POST(self):
-        if urlsplit(self.path).path != PATH:
-            self.respond(404, "Not found", "<h1>Page not found</h1>")
-            return
-        # 303 makes the browser follow the redirect with GET /500.
-        self.send_response(303)
-        self.send_header("Location", "/500")
-        self.send_header("Content-Length", "0")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-
-
-
-if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", 8081), Handler)
-    print(f"Open http://localhost:8081{PATH}", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-
-```
+This still uses the GitLab chart package, so confirm it matches the same-version chart deployed from ECR. Staging and Production assessment configurations are not included in this initial dev/test setup.
