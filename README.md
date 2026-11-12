@@ -144,9 +144,6 @@ if errors:
 
 header = """# Directory export
 
-> **Sensitive data warning:** This export contains the source files verbatim and
-> may include credentials, private keys, tokens, or other confidential data.
-
 ## Format
 
 This file was produced by `get_config.sh`. Entries are ordered by relative path
@@ -161,20 +158,17 @@ path, type, POSIX mode, numeric owner and group, and nanosecond modification
 time. The root entry records its original folder name in `root_name`.
 Symbolic-link targets are stored in `target` and are never followed.
 
-File records repeat the manifest metadata. UTF-8 text without NUL bytes uses
-`encoding: raw-utf8` and is stored as exactly `stored_bytes` bytes after the
-`<!-- Data -->` line; this length-delimited representation safely permits any
-Markdown, including code fences and marker-like text. Other files use
-`encoding: base64`; decoding yields exactly `original_bytes` bytes. A single LF
-separator follows each payload and is not part of it.
+File records repeat the manifest metadata. Every file uses `encoding: base64`;
+decoding yields exactly `original_bytes` bytes. Encoding text as well as binary
+data prevents editors, formatters, and line-ending conversion from changing the
+stored content. A single LF separator follows each payload and is not part of it.
 
 ## Restoration
 
 Parse each JSON manifest line to create directories first. Then parse each file
 record's JSON metadata, read exactly `stored_bytes` bytes after its data marker,
-and either write those bytes directly (`raw-utf8`) or Base64-decode them
-(`base64`). Create symbolic links with their recorded targets, without resolving
-them. Finally apply modes with `chmod`, modification times with `utime`, and,
+and Base64-decode them. Create symbolic links with their recorded targets,
+without resolving them. Finally apply modes with `chmod`, modification times with `utime`, and,
 where permitted, numeric owners/groups with `chown`; apply directory metadata
 last. Verify each restored file's byte count. Root privileges may be needed to
 restore ownership exactly.
@@ -205,15 +199,10 @@ try:
             if data["type"] != "file":
                 continue
             raw = contents[path]
-            try:
-                raw.decode("utf-8")
-                is_text = b"\0" not in raw
-            except UnicodeDecodeError:
-                is_text = False
-            payload = raw if is_text else base64.b64encode(raw)
+            payload = base64.b64encode(raw)
             record = dict(data)
             record.update({
-                "encoding": "raw-utf8" if is_text else "base64",
+                "encoding": "base64",
                 "original_bytes": len(raw),
                 "stored_bytes": len(payload),
             })
