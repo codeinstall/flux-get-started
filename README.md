@@ -15,8 +15,10 @@ variables:
   HCS_EKS_RACO_ROLE_ARN: 'arn:aws:iam::${ACCOUNT_ID_EKS2}:role/eks-pdu-${ENVIRONMENT}-dmae-raco-namespace-admin-role'
   NAMESPACE: 'dmae-raco-data-aa'
   NEXUS_DOCKER_REGISTRY: nexus.nonprod.dwpcloud.uk/docker-snapshots-dwp-digital-channels
+  # NEW MSA version change - STARTS HERE
   NEXUS_SNAPSHOT_DOCKER_REGISTRY: nexus.nonprod.dwpcloud.uk/docker-snapshots-dwp-digital-channels
   NEXUS_RELEASE_DOCKER_REGISTRY: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-digital-channels
+  # NEW MSA version change - ENDS HERE
   NEXUS_IMAGE_PATH: digital-channels/report-a-change-once/aa-data-publisher
   SERVICE_NAME: 'aa-data-publisher'
   GENERIC_SERVICE_HELM_CHART_VERSION: '0.70.3'
@@ -38,58 +40,46 @@ workflow:
       when: never
     - if: '$CI_COMMIT_BRANCH'
 
+# NEW MSA version change - STARTS HERE
 image-policy:
   stage: image-policy
   extends: .image-policy
-  variables:
-    GIT_DEPTH: "0"
+# NEW MSA version change - ENDS HERE
 
 get-secret:nexus-creds-docker-release:
   rules:
-    - if: '$CI_COMMIT_REF_NAME == "main"'
+    # NEW MSA version change - STARTS HERE
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
     - when: never
+    # NEW MSA version change - ENDS HERE
 
 get-secret:nexus-creds-docker-snapshot:
   rules:
+    # NEW MSA version change - STARTS HERE
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
     - when: never
+    # NEW MSA version change - ENDS HERE
 
 container_scanning:
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
     - job: docker-build
+      optional: true
       artifacts: true
+  # NEW MSA version change - ENDS HERE
+  # NEW MSA version change - STARTS HERE
   allow_failure: false
-  before_script:
-    - |
-      set -eu
-      REGISTRY_URL="${REGISTRY_URL:-$CI_REGISTRY}"
-      REGISTRY_IMAGE="${REGISTRY_IMAGE:-$CI_REGISTRY_IMAGE}"
-      REGISTRY_USER="${REGISTRY_USER:-$CI_REGISTRY_USER}"
-      REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-$CI_REGISTRY_PASSWORD}"
-
-      for VARIABLE in SELECTED_NEXUS_DOCKER_REGISTRY NEXUS_IMAGE_PATH SELECTED_IMAGE_TAG; do
-        eval "VALUE=\${${VARIABLE}:-}"
-        if [ -z "${VALUE}" ]; then
-          echo "Required image variable ${VARIABLE} is empty."
-          exit 1
-        fi
-      done
-      export CS_IMAGE="${SELECTED_NEXUS_DOCKER_REGISTRY}/${NEXUS_IMAGE_PATH}:${SELECTED_IMAGE_TAG}"
-      export SCAN_IMAGE="${CS_IMAGE}"
-      echo "Scanning image: ${CS_IMAGE}"
-      echo "Registry URL: ${REGISTRY_URL}"
-
-      export no_proxy="${no_proxy:-},docker"
-      export NO_PROXY="${NO_PROXY:-},docker"
-
-      if [[ -z "${REGISTRY_USER}" || -z "${REGISTRY_PASSWORD}" ]]; then
-        echo "Registry credentials are missing"
-        exit 1
-      fi
+  # NEW MSA version change - ENDS HERE
+  # NEW MSA version change - STARTS HERE
+  variables:
+    CS_IMAGE: $SELECTED_NEXUS_DOCKER_REGISTRY/$NEXUS_IMAGE_PATH:$SELECTED_IMAGE_TAG
+    SCAN_IMAGE: $SELECTED_NEXUS_DOCKER_REGISTRY/$NEXUS_IMAGE_PATH:$SELECTED_IMAGE_TAG
+  # NEW MSA version change - ENDS HERE
+  # NEW MSA version change - STARTS HERE
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
@@ -104,14 +94,26 @@ container_scanning:
         - gitlab-ci/common-jobs.yaml
         - gitlab-ci/includes.yaml
     - when: never
+  # NEW MSA version change - ENDS HERE
 
 container-scanning-cosign-vuln:
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
     - job: docker-build
+      optional: true
       artifacts: true
+  # NEW MSA version change - ENDS HERE
+  # NEW MSA version change - STARTS HERE
   allow_failure: false
+  # NEW MSA version change - ENDS HERE
+  # NEW MSA version change - STARTS HERE
+  variables:
+    CS_IMAGE: $SELECTED_NEXUS_DOCKER_REGISTRY/$NEXUS_IMAGE_PATH:$SELECTED_IMAGE_TAG
+    SCAN_IMAGE: $SELECTED_NEXUS_DOCKER_REGISTRY/$NEXUS_IMAGE_PATH:$SELECTED_IMAGE_TAG
+  # NEW MSA version change - ENDS HERE
+  # NEW MSA version change - STARTS HERE
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes:
@@ -126,6 +128,7 @@ container-scanning-cosign-vuln:
         - gitlab-ci/common-jobs.yaml
         - gitlab-ci/includes.yaml
     - when: never
+  # NEW MSA version change - ENDS HERE
 
 openapi-validation:
   rules: [when: never]
@@ -167,9 +170,11 @@ msa-render:
       - ENVIRONMENT: [dev, test]
   variables:
     ACCOUNT_ID_EKS2: '943009210227'
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
+  # NEW MSA version change - ENDS HERE
   allow_failure: true
 
 msa-compliance-check:
@@ -206,32 +211,26 @@ docker-build:
     - name: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/docker-cosign:1.11.1@sha256:57409822a66b9119165fabeeba85c2c42e23e994aa0f63093dbeec448f9a13b9
       alias: docker
   needs:
+    # NEW MSA version change - STARTS HERE
     - job: image-policy
       artifacts: true
+    # NEW MSA version change - ENDS HERE
     - job: get-secret:nexus-creds-docker-snapshot
+      optional: true
+      artifacts: true
+    - job: get-secret:nexus-creds-docker-release
       optional: true
       artifacts: true
   extends:
     - .docker-build-and-push-to-nexus
   variables:
     DOCKER_TLS_CERTDIR: '/certs'
+  # NEW MSA version change - STARTS HERE
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: on_success
     - when: never
-
-promote-image-to-nexus-release:
-  stage: publish
-  extends: .promote-to-nexus-release
-  needs:
-    - job: image-policy
-      artifacts: true
-    - job: get-secret:nexus-creds-docker-release
-      artifacts: true
-  rules:
-    - if: '$CI_COMMIT_REF_NAME == "main"'
-      when: on_success
-    - when: never
+  # NEW MSA version change - ENDS HERE
 
 virus-scan:
   stage: security-dynamic-analysis
@@ -245,6 +244,7 @@ virus-scan:
 
 push-to-ecr-pdu-dev:
   stage: deploy-dev
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
@@ -255,8 +255,7 @@ push-to-ecr-pdu-dev:
       optional: true
     - job: container-scanning-cosign-vuln
       optional: true
-    - job: promote-image-to-nexus-release
-      optional: true
+  # NEW MSA version change - ENDS HERE
   extends:
     - .assume-hcs-eks-raco-role
     - .push-to-ecr
@@ -270,11 +269,13 @@ push-to-ecr-pdu-dev:
 
 ecr-vuln-scan-pdu-dev:
   stage: deploy-dev
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
     - job: push-to-ecr-pdu-dev
       artifacts: true
+  # NEW MSA version change - ENDS HERE
   extends:
     - .assume-hcs-eks-raco-role
     - .scan-ecr-vulns
@@ -289,10 +290,12 @@ ecr-vuln-scan-pdu-dev:
 
 deploy-helm-values-pdu-dev:
   stage: deploy-dev
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
     - job: ecr-vuln-scan-pdu-dev
+  # NEW MSA version change - ENDS HERE
   extends:
     - .assume-hcs-eks-raco-role
     - .helm-upgrade
@@ -302,6 +305,7 @@ deploy-helm-values-pdu-dev:
     OIDC_ROLE_NAME: 'raco-oidc-runner-np'
     ENVIRONMENT: 'dev'
 
+# NEW MSA version change - STARTS HERE
 dev-version-check:
   stage: deploy-dev
   image: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/kube-score-helm-yq:1.1.0@sha256:3c293b09b0b57031d2a16247b44923150b25180b8aa0b1fc7dbf48df1b3b9fcf
@@ -322,6 +326,7 @@ dev-version-check:
         echo "Application changes require a new semantic version in Dev values."
         exit 1
       fi
+# NEW MSA version change - ENDS HERE
 
 # ----------------------------------------------------------------------------------------------------------------
 # DEPLOY TEST
@@ -329,6 +334,7 @@ dev-version-check:
 
 push-to-ecr-pdu-test:
   stage: deploy-test
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
@@ -336,6 +342,7 @@ push-to-ecr-pdu-test:
     - job: docker-build
       optional: true
       artifacts: true
+  # NEW MSA version change - ENDS HERE
   extends:
     - .assume-hcs-eks-raco-role
     - .push-to-ecr
@@ -345,16 +352,20 @@ push-to-ecr-pdu-test:
     OIDC_ROLE_NAME: 'raco-oidc-runner-np'
     ENVIRONMENT: 'test'
   rules:
+    # NEW MSA version change - STARTS HERE
     - when: manual
       allow_failure: true
+    # NEW MSA version change - ENDS HERE
 
 ecr-vuln-scan-pdu-test:
   stage: deploy-test
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
     - job: push-to-ecr-pdu-test
       artifacts: true
+  # NEW MSA version change - ENDS HERE
   extends:
     - .assume-hcs-eks-raco-role
     - .scan-ecr-vulns
@@ -372,16 +383,19 @@ deploy-helm-values-pdu-test:
   extends:
     - .assume-hcs-eks-raco-role
     - .helm-upgrade
+  # NEW MSA version change - STARTS HERE
   needs:
     - job: image-policy
       artifacts: true
     - job: ecr-vuln-scan-pdu-test
+  # NEW MSA version change - ENDS HERE
   variables:
     ACCOUNT_ID_EKS2: '943009210227'
     OIDC_ROLE_ACCOUNT_ID: '533267201269'
     OIDC_ROLE_NAME: 'raco-oidc-runner-np'
     ENVIRONMENT: 'test'
 
+# NEW MSA version change - STARTS HERE
 test-version-check:
   stage: deploy-test
   image: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/kube-score-helm-yq:1.1.0@sha256:3c293b09b0b57031d2a16247b44923150b25180b8aa0b1fc7dbf48df1b3b9fcf
@@ -406,6 +420,7 @@ test-version-check:
         echo "Test values must use ${INTENDED_VERSION}."
         exit 1
       fi
+# NEW MSA version change - ENDS HERE
 
 # ----------------------------------------------------------------------------------------------------------------
 # DEPLOY STAGING
