@@ -492,7 +492,15 @@
         exit 1
       fi
 
-      if ! printf '%s\n' "${PULL_OUTPUT}" | grep -Eqi 'manifest unknown|manifest .*not found|manifest does not exist'; then
+      MISSING_IMAGE=false
+      if printf '%s\n' "${PULL_OUTPUT}" | grep -Eqi 'manifest unknown|manifest .*not found|manifest does not exist'; then
+        MISSING_IMAGE=true
+      elif printf '%s\n' "${PULL_OUTPUT}" | grep -Fq 'failed to resolve reference' \
+        && printf '%s\n' "${PULL_OUTPUT}" | grep -Fq "${IMAGE}: not found"; then
+        MISSING_IMAGE=true
+      fi
+
+      if [ "${MISSING_IMAGE}" != "true" ]; then
         printf '%s\n' "${PULL_OUTPUT}"
         exit "${PULL_STATUS}"
       fi
