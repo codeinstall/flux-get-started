@@ -30,12 +30,20 @@
     - |
       set -eu
 
+      for tool in git yq grep tee; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+          echo "ERROR: Required command '$tool' is missing from the image-policy container."
+          exit 127
+        fi
+      done
+
       read_tag() {
         yq eval -r '.deployment.containers.main.image.tag // ""' "$1"
       }
 
       read_base_tag() {
-        git show "${COMPARE_SHA}:$1" | yq eval -r '.deployment.containers.main.image.tag // ""' -
+        BASE_VALUES=$(git show "${COMPARE_SHA}:$1") || return 1
+        printf '%s\n' "${BASE_VALUES}" | yq eval -r '.deployment.containers.main.image.tag // ""' -
       }
 
       DEV_IMAGE_TAG=$(read_tag values/pdu-dev-values.yaml)
@@ -75,7 +83,7 @@
           APP_CHANGED=true
         fi
 
-        BASE_DEV_IMAGE_TAG=$(read_base_tag values/pdu-dev-values.yaml || true)
+        BASE_DEV_IMAGE_TAG=$(read_base_tag values/pdu-dev-values.yaml)
         if [ "${DEV_IMAGE_TAG}" != "${BASE_DEV_IMAGE_TAG}" ]; then
           DEV_TAG_CHANGED=true
         fi
