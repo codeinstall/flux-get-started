@@ -25,7 +25,7 @@
     - aws sts get-caller-identity
 
 .image-policy: &image-policy
-  image: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/kube-score-helm-yq:1.1.0@sha256:3c293b09b0b57031d2a16247b44923150b25180b8aa0b1fc7dbf48df1b3b9fcf
+  image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
   script:
     - |
       set -eu
@@ -36,6 +36,12 @@
           exit 127
         fi
       done
+      git --version
+      yq --version
+      if [ "$(printf 'value: compatible\n' | yq eval -r '.value' -)" != "compatible" ]; then
+        echo "ERROR: The image-policy container has an incompatible yq command."
+        exit 1
+      fi
 
       read_tag() {
         yq eval -r '.deployment.containers.main.image.tag // ""' "$1"
