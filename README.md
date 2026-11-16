@@ -1,28 +1,89 @@
 ```
-import http from 'node:http';
+default:
+  tags: [dwp-aws-x86-linux-l]
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
 
-const host = '127.0.0.1';
-const port = 8085;
+include:
+  - local: '/gitlab-ci/common-jobs.yaml'
+  - local: '/gitlab-ci/stages.yaml'
 
-const server = http.createServer((request, response) => {
-  if (request.method === 'GET' && request.url === '/health') {
-    response.writeHead(200, { 'content-type': 'text/plain' });
-    response.end('Healthy');
-    return;
-  }
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - when: never
 
-  if (request.method === 'GET' && request.url === '/live') {
-    response.writeHead(200, { 'content-type': 'text/plain' });
-    response.end('Live');
-    return;
-  }
+smoke:aa-data-publisher:
+  stage: smoke-test
+  extends: .aa-data-publisher-smoke
 
-  response.writeHead(404, { 'content-type': 'text/plain' });
-  response.end('Not Found');
-});
+smoke:landing-ui:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
 
-server.listen(port, host, () => {
-  console.log(`AA Data Publisher mock listening on http://${host}:${port}`);
-});
+smoke:journey-ui:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:decision-tree:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:orchestrator:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:pdf-generator:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:ecms-adapter:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:residency-adapter:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:audit-adapter:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:cryptology:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:token-manager:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
+
+smoke:kong-gateway:
+  stage: smoke-test
+  extends: .disabled-smoke-test
+  rules:
+    - when: never
 
 ```
