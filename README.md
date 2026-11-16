@@ -1,22 +1,28 @@
 ```
-import { expect, test } from '@playwright/test';
+import http from 'node:http';
 
-test.describe('AA data publisher', () => {
-  test('reports healthy', async ({ request }) => {
-    const response = await request.get('/health');
+const host = '127.0.0.1';
+const port = 8085;
 
-    expect(response.status()).toBe(200);
-    expect(response.headers()['content-type']).toContain('text/plain');
-    expect(await response.text()).toBe('Healthy');
-  });
+const server = http.createServer((request, response) => {
+  if (request.method === 'GET' && request.url === '/health') {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('Healthy');
+    return;
+  }
 
-  test('reports live', async ({ request }) => {
-    const response = await request.get('/live');
+  if (request.method === 'GET' && request.url === '/live') {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('Live');
+    return;
+  }
 
-    expect(response.status()).toBe(200);
-    expect(response.headers()['content-type']).toContain('text/plain');
-    expect(await response.text()).toBe('Live');
-  });
+  response.writeHead(404, { 'content-type': 'text/plain' });
+  response.end('Not Found');
+});
+
+server.listen(port, host, () => {
+  console.log(`AA Data Publisher mock listening on http://${host}:${port}`);
 });
 
 ```
