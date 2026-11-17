@@ -180,9 +180,7 @@
 .tag-nexus-snapshot:
   image: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/skopeo:1.2.0@sha256:9dc9d4507457616ea93b52fbf99681f51ab8817a1007640d9e3817cd44199563
   before_script:
-    - export SNAPSHOT_USER=$(jq -r '.username' nexus-snapshot-credentials.json)
-    - export SNAPSHOT_TOKEN=$(jq -r '.token' nexus-snapshot-credentials.json)
-    - echo "${SNAPSHOT_TOKEN}" | skopeo login --username "${SNAPSHOT_USER}" --password-stdin "${NEXUS_SNAPSHOT_DOCKER_REGISTRY}"
+    - export REGISTRY_AUTH_FILE="${CI_PROJECT_DIR}/nexus-snapshot-credentials.json"
   script:
     - |
       set -eu
@@ -197,8 +195,6 @@
       skopeo inspect "docker://${SOURCE_IMAGE}" > /dev/null
 
       skopeo copy --override-arch=amd64 --override-os=linux "docker://${SOURCE_IMAGE}" "docker://${SEMANTIC_IMAGE}"
-  after_script:
-    - skopeo logout "${NEXUS_SNAPSHOT_DOCKER_REGISTRY}"
 
 .promote-to-nexus-release:
   image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
