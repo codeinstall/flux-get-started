@@ -74,12 +74,38 @@ container_scanning:
       REGISTRY_USER="${REGISTRY_USER:-$CI_REGISTRY_USER}"
       REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-$CI_REGISTRY_PASSWORD}"
 
+      if ! command -v yq >/dev/null 2>&1; then
+        echo "The scanner image does not contain yq."
+        exit 1
+      fi
+      if [ "$(printf 'value: compatible\n' | yq eval -r '.value' -)" != "compatible" ]; then
+        echo "The scanner image contains an incompatible yq command."
+        exit 1
+      fi
+
+      DEV_IMAGE_TAG=$(yq eval -r '.deployment.containers.main.image.tag // ""' values/pdu-dev-values.yaml)
+      if ! printf '%s\n' "${DEV_IMAGE_TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+        echo "values/pdu-dev-values.yaml must contain a valid vMAJOR.MINOR.PATCH image tag."
+        exit 1
+      fi
+
       if [ "${CI_PIPELINE_SOURCE}" = "merge_request_event" ]; then
-        SCAN_NEXUS_DOCKER_REGISTRY=${SELECTED_NEXUS_DOCKER_REGISTRY}
-        SCAN_IMAGE_TAG=${SELECTED_IMAGE_TAG}
-      else
+        SCAN_NEXUS_DOCKER_REGISTRY=${NEXUS_SNAPSHOT_DOCKER_REGISTRY}
+        SCAN_IMAGE_TAG="${DEV_IMAGE_TAG}-${CI_COMMIT_SHORT_SHA}"
+      elif [ "${CI_COMMIT_BRANCH:-}" = "main" ]; then
         SCAN_NEXUS_DOCKER_REGISTRY=${NEXUS_RELEASE_DOCKER_REGISTRY}
         SCAN_IMAGE_TAG=${DEV_IMAGE_TAG}
+      else
+        case "${CI_COMMIT_TAG:-}" in
+          release/*)
+            SCAN_NEXUS_DOCKER_REGISTRY=${NEXUS_RELEASE_DOCKER_REGISTRY}
+            SCAN_IMAGE_TAG=${DEV_IMAGE_TAG}
+            ;;
+          *)
+            echo "Nexus scan image selection is not configured for this pipeline."
+            exit 1
+            ;;
+        esac
       fi
 
       for VARIABLE in SCAN_NEXUS_DOCKER_REGISTRY NEXUS_IMAGE_PATH SCAN_IMAGE_TAG; do
