@@ -1,325 +1,607 @@
 ```
-{
-  "name": "raco-shared-automation",
-  "version": "1.0.0",
-  "lockfileVersion": 3,
-  "requires": true,
-  "packages": {
-    "": {
-      "name": "raco-shared-automation",
-      "version": "1.0.0",
-      "devDependencies": {
-        "@kafkajs/confluent-schema-registry": "4.1.0",
-        "@playwright/test": "1.56.1",
-        "@types/node": "24.10.0",
-        "kafkajs": "2.2.4",
-        "typescript": "5.9.3"
+.assume-hcs-eks-raco-role: &assume-hcs-eks-raco-role
+  before_script:
+    - export AWS_OIDC_DEPLOYER_ROLE=arn:aws:iam::${OIDC_ROLE_ACCOUNT_ID}:role/${OIDC_ROLE_NAME}
+    - echo "Assuming OIDC Deployer role - ${AWS_OIDC_DEPLOYER_ROLE}"
+    - export AWS_STS_Regional_Endpoints=regional
+    - >
+      export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
+      $(aws sts assume-role-with-web-identity
+      --role-arn ${AWS_OIDC_DEPLOYER_ROLE}
+      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token ${GITLAB_OIDC_TOKEN}
+      --duration-seconds 3600
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+    - aws sts get-caller-identity
+    - echo "Assuming HCS EKS RACO namespace role"
+    - >
+      export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
+      $(aws sts assume-role
+      --role-arn ${HCS_EKS_RACO_ROLE_ARN}
+      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+    - aws sts get-caller-identity
+
+.image-policy: &image-policy
+  image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
+  script:
+    - |
+      set -eu
+
+      for tool in git yq grep tee; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+          echo "ERROR: Required command '$tool' is missing from the image-policy container."
+          exit 127
+        fi
+      done
+      git --version
+      yq --version
+      if [ "$(printf 'value: compatible\n' | yq eval -r '.value' -)" != "compatible" ]; then
+        echo "ERROR: The image-policy container has an incompatible yq command."
+        exit 1
+      fi
+
+      read_tag() {
+        yq eval -r '.deployment.containers.main.image.tag // ""' "$1"
       }
-    },
-    "node_modules/@kafkajs/confluent-schema-registry": {
-      "version": "4.1.0",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@kafkajs/confluent-schema-registry/-/confluent-schema-registry-4.1.0.tgz",
-      "integrity": "sha512-0/OM85fT66zsi+eBE56FnmdI2qAKBkhiXIYKnB4q1jB0AvUucRBvyqmld0l05q0r2FIODa0NG9612dLblxxI5Q==",
-      "dev": true,
-      "dependencies": {
-        "ajv": "^8.18.0",
-        "avsc": ">= 5.4.13 < 6",
-        "mappersmith": ">= 2.44.0 < 3",
-        "protobufjs": "^7.4.0"
-      },
-      "engines": {
-        "node": ">=22.0.0"
+
+      read_base_tag() {
+        BASE_VALUES=$(git show "${COMPARE_SHA}:$1") || return 1
+        printf '%s\n' "${BASE_VALUES}" | yq eval -r '.deployment.containers.main.image.tag // ""' -
       }
-    },
-    "node_modules/@playwright/test": {
-      "version": "1.56.1",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@playwright/test/-/test-1.56.1.tgz",
-      "integrity": "sha512-vSMYtL/zOcFpvJCW71Q/OEGQb7KYBPAdKh35WNSkaZA75JlAO8ED8UN6GUNTm3drWomcbcqRPFqQbLae8yBTdg==",
-      "dev": true,
-      "license": "Apache-2.0",
-      "dependencies": {
-        "playwright": "1.56.1"
-      },
-      "bin": {
-        "playwright": "cli.js"
-      },
-      "engines": {
-        "node": ">=18"
+
+      DEV_IMAGE_TAG=$(read_tag values/pdu-dev-values.yaml)
+      TEST_IMAGE_TAG=$(read_tag values/pdu-test-values.yaml)
+
+      read_optional_tag() {
+        VALUES_FILE="$1"
+        VARIABLE_NAME="$2"
+
+        if [ ! -f "${VALUES_FILE}" ]; then
+          eval "${VARIABLE_NAME}=''"
+          return
+        fi
+
+        IMAGE_TAG=$(read_tag "${VALUES_FILE}")
+        if [ -z "${IMAGE_TAG}" ]; then
+          echo "${VALUES_FILE} exists but deployment.containers.main.image.tag is missing."
+          exit 1
+        fi
+        if ! printf '%s\n' "${IMAGE_TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+          echo "${VALUES_FILE} contains invalid image tag ${IMAGE_TAG}."
+          exit 1
+        fi
+
+        eval "${VARIABLE_NAME}=\${IMAGE_TAG}"
       }
-    },
-    "node_modules/@protobufjs/aspromise": {
-      "version": "1.1.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/aspromise/-/aspromise-1.1.2.tgz",
-      "integrity": "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/base64": {
-      "version": "1.1.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/base64/-/base64-1.1.2.tgz",
-      "integrity": "sha512-AZkcAA5vnN/v4PDqKyMR5lx7hZttPDgClv83E//FMNhR2TMcLUhfRUBHCmSl0oi9zMgDDqRUJkSxO3wm85+XLg==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/codegen": {
-      "version": "2.0.5",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/codegen/-/codegen-2.0.5.tgz",
-      "integrity": "sha512-zgXFLzW3Ap33e6d0Wlj4MGIm6Ce8O89n/apUaGNB/jx+hw+ruWEp7EwGUshdLKVRCxZW12fp9r40E1mQrf/34g==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/eventemitter": {
-      "version": "1.1.1",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/eventemitter/-/eventemitter-1.1.1.tgz",
-      "integrity": "sha512-vW1GmwMZNnL+gMRaovlh9yZX74kc+TTU3FObkkurpMaRtBfLP3ldjS9KQWlwZgraRE0+dheEEoAxdzcJQ8eXZg==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/fetch": {
-      "version": "1.1.1",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/fetch/-/fetch-1.1.1.tgz",
-      "integrity": "sha512-GpptLrs57adMSuHi3VNj0mAF8dwh36LMaYF6XyJ6JMWlVsc+t42tm1HSEDmOs3A8fC9yyeisgLhsTVQokOZ0zw==",
-      "dev": true,
-      "license": "BSD-3-Clause",
-      "dependencies": {
-        "@protobufjs/aspromise": "^1.1.1"
-      }
-    },
-    "node_modules/@protobufjs/float": {
-      "version": "1.0.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/float/-/float-1.0.2.tgz",
-      "integrity": "sha512-Ddb+kVXlXst9d+R9PfTIxh1EdNkgoRe5tOX6t01f1lYWOvJnSPDBlG241QLzcyPdoNTsblLUdujGSE4RzrTZGQ==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/path": {
-      "version": "1.1.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/path/-/path-1.1.2.tgz",
-      "integrity": "sha512-6JOcJ5Tm08dOHAbdR3GrvP+yUUfkjG5ePsHYczMFLq3ZmMkAD98cDgcT2iA1lJ9NVwFd4tH/iSSoe44YWkltEA==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/pool": {
-      "version": "1.1.0",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/pool/-/pool-1.1.0.tgz",
-      "integrity": "sha512-0kELaGSIDBKvcgS4zkjz1PeddatrjYcmMWOlAuAPwAeccUrPHdUqo/J6LiymHHEiJT5NrF1UVwxY14f+fy4WQw==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@protobufjs/utf8": {
-      "version": "1.1.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@protobufjs/utf8/-/utf8-1.1.2.tgz",
-      "integrity": "sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==",
-      "dev": true,
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/@types/node": {
-      "version": "24.10.0",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/@types/node/-/node-24.10.0.tgz",
-      "integrity": "sha512-qzQZRBqkFsYyaSWXuEHc2WR9c0a0CXwiE5FWUvn7ZM+vdy1uZLfCunD38UzhuB7YN/J11ndbDBcTmOdxJo9Q7A==",
-      "dev": true,
-      "license": "MIT",
-      "dependencies": {
-        "undici-types": "~7.16.0"
-      }
-    },
-    "node_modules/ajv": {
-      "version": "8.20.0",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/ajv/-/ajv-8.20.0.tgz",
-      "integrity": "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
-      "dev": true,
-      "license": "MIT",
-      "dependencies": {
-        "fast-deep-equal": "^3.1.3",
-        "fast-uri": "^3.0.1",
-        "json-schema-traverse": "^1.0.0",
-        "require-from-string": "^2.0.2"
-      },
-      "funding": {
-        "type": "github",
-        "url": "https://github.com/sponsors/epoberezkin"
-      }
-    },
-    "node_modules/avsc": {
-      "version": "5.7.9",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/avsc/-/avsc-5.7.9.tgz",
-      "integrity": "sha512-yOA4wFeI7ET3v32Di/sUybQ+ttP20JHSW3mxLuNGeO0uD6PPcvLrIQXSvy/rhJOWU5JrYh7U4OHplWMmtAtjMg==",
-      "dev": true,
-      "license": "MIT",
-      "engines": {
-        "node": ">=0.11"
-      }
-    },
-    "node_modules/fast-deep-equal": {
-      "version": "3.1.3",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
-      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
-      "dev": true,
-      "license": "MIT"
-    },
-    "node_modules/fast-uri": {
-      "version": "3.1.9",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/fast-uri/-/fast-uri-3.1.9.tgz",
-      "integrity": "sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==",
-      "dev": true,
-      "funding": [
+
+      read_optional_tag values/pdu-stage-values.yaml STAGE_IMAGE_TAG
+      read_optional_tag values/pdu-prod-values.yaml PROD_IMAGE_TAG
+
+      for IMAGE_TAG in "${DEV_IMAGE_TAG}" "${TEST_IMAGE_TAG}"; do
+        if ! printf '%s\n' "${IMAGE_TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+          echo "Dev and Test image tags must use vMAJOR.MINOR.PATCH."
+          exit 1
+        fi
+      done
+
+      APP_CHANGED=false
+      DEV_TAG_CHANGED=false
+      DEPLOYMENT_PURPOSE=committed
+      INTENDED_VERSION=${DEV_IMAGE_TAG}
+      SELECTED_IMAGE_TAG=${DEV_IMAGE_TAG}
+      DEPLOYMENT_IMAGE_TAG=${DEV_IMAGE_TAG}
+      COMPARE_SHA=
+
+      if [ "${CI_PIPELINE_SOURCE}" = "merge_request_event" ]; then
+        COMPARE_SHA=${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}
+        if [ -z "${COMPARE_SHA}" ]; then
+          echo "The merge request comparison commit is not available."
+          exit 1
+        fi
+        command -v git
+        git --version
+        git rev-parse --is-shallow-repository
+        printf 'MR comparison commit: %s\n' "${COMPARE_SHA}"
+        if ! git cat-file -e "${COMPARE_SHA}^{commit}"; then
+          echo "Comparison commit ${COMPARE_SHA} could not be read."
+          exit 1
+        fi
+
+        CHANGED_FILES=$(git diff --name-only "${COMPARE_SHA}" "${CI_COMMIT_SHA}")
+        if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(Dockerfile$|\.dockerignore$|package(-lock)?\.json$|src/|@types/|tsconfig\.json$)'; then
+          APP_CHANGED=true
+        fi
+
+        BASE_DEV_IMAGE_TAG=$(read_base_tag values/pdu-dev-values.yaml)
+        if [ "${DEV_IMAGE_TAG}" != "${BASE_DEV_IMAGE_TAG}" ]; then
+          DEV_TAG_CHANGED=true
+        fi
+
+        if [ "${APP_CHANGED}" = "true" ]; then
+          DEPLOYMENT_PURPOSE=application-pr
+          SELECTED_IMAGE_TAG="${DEV_IMAGE_TAG}-${CI_COMMIT_SHORT_SHA}"
+          DEPLOYMENT_IMAGE_TAG=${SELECTED_IMAGE_TAG}
+          if [ "${DEV_TAG_CHANGED}" = "true" ]; then
+            DEPLOYMENT_IMAGE_TAG=${DEV_IMAGE_TAG}
+          fi
+        fi
+      fi
+
+      if ! printf '%s\n' "${SELECTED_IMAGE_TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9a-f]+)?$'; then
+        echo "Selected image tag ${SELECTED_IMAGE_TAG} is not valid."
+        exit 1
+      fi
+
+      SELECTED_NEXUS_DOCKER_REGISTRY=${NEXUS_SNAPSHOT_DOCKER_REGISTRY}
+      SELECTED_NEXUS_CREDENTIAL_FILE=nexus-snapshot-credentials.json
+
+      DOCKER_BUILD_CONTEXT=.
+      DOCKER_BUILD_DOCKERFILE=Dockerfile
+      DOCKER_BUILD_TARGET='<default>'
+      DOCKER_BUILD_ARGUMENTS='<none>'
+      BUILD_INPUTS_DIGEST=$(
         {
-          "type": "github",
-          "url": "https://github.com/sponsors/fastify"
-        },
+          git ls-tree -r "${CI_COMMIT_SHA}" -- \
+            Dockerfile .dockerignore package.json package-lock.json src @types tsconfig.json
+          printf '%s\n' \
+            "context=${DOCKER_BUILD_CONTEXT}" \
+            "dockerfile=${DOCKER_BUILD_DOCKERFILE}" \
+            "target=${DOCKER_BUILD_TARGET}" \
+            "build-arguments=${DOCKER_BUILD_ARGUMENTS}"
+        } | git hash-object --stdin
+      )
+
+      {
+        echo "APP_CHANGED=${APP_CHANGED}"
+        echo "DEV_TAG_CHANGED=${DEV_TAG_CHANGED}"
+        echo "DEPLOYMENT_PURPOSE=${DEPLOYMENT_PURPOSE}"
+        echo "INTENDED_VERSION=${INTENDED_VERSION}"
+        echo "SELECTED_IMAGE_TAG=${SELECTED_IMAGE_TAG}"
+        echo "DEPLOYMENT_IMAGE_TAG=${DEPLOYMENT_IMAGE_TAG}"
+        echo "DEV_IMAGE_TAG=${DEV_IMAGE_TAG}"
+        echo "TEST_IMAGE_TAG=${TEST_IMAGE_TAG}"
+        echo "STAGE_IMAGE_TAG=${STAGE_IMAGE_TAG}"
+        echo "PROD_IMAGE_TAG=${PROD_IMAGE_TAG}"
+        echo "BUILD_INPUTS_DIGEST=${BUILD_INPUTS_DIGEST}"
+        echo "DOCKER_BUILD_CONTEXT=${DOCKER_BUILD_CONTEXT}"
+        echo "DOCKER_BUILD_DOCKERFILE=${DOCKER_BUILD_DOCKERFILE}"
+        echo "SELECTED_NEXUS_DOCKER_REGISTRY=${SELECTED_NEXUS_DOCKER_REGISTRY}"
+        echo "SELECTED_NEXUS_CREDENTIAL_FILE=${SELECTED_NEXUS_CREDENTIAL_FILE}"
+      } | tee image-policy.env
+  artifacts:
+    reports:
+      dotenv: image-policy.env
+    paths:
+      - image-policy.env
+
+.tag-nexus-snapshot:
+  image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
+  before_script:
+    - export SNAPSHOT_USER=$(yq eval -r '.username' nexus-snapshot-credentials.json)
+    - export SNAPSHOT_TOKEN=$(yq eval -r '.token' nexus-snapshot-credentials.json)
+    - echo "${SNAPSHOT_TOKEN}" | skopeo login --username "${SNAPSHOT_USER}" --password-stdin "${NEXUS_SNAPSHOT_DOCKER_REGISTRY}"
+  script:
+    - |
+      set -eu
+
+      if [ "${APP_CHANGED}" != "true" ] || [ "${DEV_TAG_CHANGED}" != "true" ]; then
+        echo "No semantic snapshot tag is required."
+        exit 0
+      fi
+
+      SOURCE_IMAGE="${NEXUS_SNAPSHOT_DOCKER_REGISTRY}/${NEXUS_IMAGE_PATH}:${SELECTED_IMAGE_TAG}"
+      SEMANTIC_IMAGE="${NEXUS_SNAPSHOT_DOCKER_REGISTRY}/${NEXUS_IMAGE_PATH}:${DEV_IMAGE_TAG}"
+      skopeo inspect "docker://${SOURCE_IMAGE}" > /dev/null
+
+      skopeo copy --override-arch=amd64 --override-os=linux "docker://${SOURCE_IMAGE}" "docker://${SEMANTIC_IMAGE}"
+  after_script:
+    - skopeo logout "${NEXUS_SNAPSHOT_DOCKER_REGISTRY}"
+
+.promote-to-nexus-release:
+  image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
+  before_script:
+    - export RELEASE_USER=$(yq eval -r '.username' nexus-release-credentials.json)
+    - export RELEASE_TOKEN=$(yq eval -r '.token' nexus-release-credentials.json)
+    - echo "${RELEASE_TOKEN}" | skopeo login --username "${RELEASE_USER}" --password-stdin "${NEXUS_RELEASE_DOCKER_REGISTRY}"
+  script:
+    - |
+      set -eu
+
+      IMAGE_TAG=$(yq eval -r '.deployment.containers.main.image.tag // ""' values/pdu-dev-values.yaml)
+      if ! printf '%s\n' "${IMAGE_TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+        echo "values/pdu-dev-values.yaml must contain a valid vMAJOR.MINOR.PATCH image tag."
+        exit 1
+      fi
+      SNAPSHOT_IMAGE="${NEXUS_SNAPSHOT_DOCKER_REGISTRY}/${NEXUS_IMAGE_PATH}:${IMAGE_TAG}"
+      RELEASE_IMAGE="${NEXUS_RELEASE_DOCKER_REGISTRY}/${NEXUS_IMAGE_PATH}:${IMAGE_TAG}"
+
+      set +e
+      INSPECT_OUTPUT=$(skopeo inspect "docker://${RELEASE_IMAGE}" 2>&1)
+      INSPECT_STATUS=$?
+      set -e
+      if [ "${INSPECT_STATUS}" -eq 0 ]; then
+        echo "Release image ${IMAGE_TAG} already exists - reusing it."
+        exit 0
+      elif ! printf '%s\n' "${INSPECT_OUTPUT}" | grep -Eqi 'manifest unknown|name unknown|manifest .*not found|manifest does not exist'; then
+        printf '%s\n' "${INSPECT_OUTPUT}"
+        exit "${INSPECT_STATUS}"
+      fi
+
+      set +e
+      INSPECT_OUTPUT=$(skopeo inspect "docker://${SNAPSHOT_IMAGE}" 2>&1)
+      INSPECT_STATUS=$?
+      set -e
+      if [ "${INSPECT_STATUS}" -ne 0 ]; then
+        if printf '%s\n' "${INSPECT_OUTPUT}" | grep -Eqi 'manifest unknown|name unknown|manifest .*not found|manifest does not exist'; then
+          echo "Snapshot image ${IMAGE_TAG} does not exist and cannot be promoted."
+          exit 1
+        fi
+        printf '%s\n' "${INSPECT_OUTPUT}"
+        exit "${INSPECT_STATUS}"
+      fi
+
+      skopeo copy --override-arch=amd64 --override-os=linux "docker://${SNAPSHOT_IMAGE}" "docker://${RELEASE_IMAGE}"
+  after_script:
+    - skopeo logout "${NEXUS_RELEASE_DOCKER_REGISTRY}"
+
+.helm-upgrade: &helm-upgrade
+  image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
+  script:
+    - aws ecr get-login-password --region eu-west-2 | helm registry login --username AWS --password-stdin ${ACCOUNT_ID_EKS2}.dkr.ecr.eu-west-2.amazonaws.com
+    - aws eks update-kubeconfig --region eu-west-2 --name pdu-${ENVIRONMENT}-eks-cluster
+    - |
+      set -eu
+      if [ "${DEPLOYMENT_PURPOSE:-committed}" = "application-pr" ]; then
+        helm upgrade --install --wait "${SERVICE_NAME}" "oci://${ACCOUNT_ID_EKS2}.dkr.ecr.eu-west-2.amazonaws.com/pdu-${ENVIRONMENT}/helm/generic-service" \
+          --version "${GENERIC_SERVICE_HELM_CHART_VERSION}" \
+          --namespace "${NAMESPACE}" \
+          --history-max 2 \
+          --values="values/pdu-${ENVIRONMENT}-values.yaml" \
+          --set-string deployment.containers.main.image.tag="${DEPLOYMENT_IMAGE_TAG}" \
+          --set-string deployment.containers.main.image.repository="${ECR_REPOSITORY}"
+      else
+        helm upgrade --install --wait "${SERVICE_NAME}" "oci://${ACCOUNT_ID_EKS2}.dkr.ecr.eu-west-2.amazonaws.com/pdu-${ENVIRONMENT}/helm/generic-service" \
+          --version "${GENERIC_SERVICE_HELM_CHART_VERSION}" \
+          --namespace "${NAMESPACE}" \
+          --history-max 2 \
+          --values="values/pdu-${ENVIRONMENT}-values.yaml"
+      fi
+    - |
+      echo "Running post deployment status check..."
+      kubectl config set-context --current --namespace=${NAMESPACE}
+      if ! kubectl rollout status deployment/"${SERVICE_NAME}-main" --timeout=60s; then
+        echo "Deployment failed for ${SERVICE_NAME}"
+        exit 1
+      fi
+
+.kube-score: &kube-score
+  image: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/kube-score-helm-yq:1.1.0@sha256:3c293b09b0b57031d2a16247b44923150b25180b8aa0b1fc7dbf48df1b3b9fcf
+  script:
+    - VALUES_FILE="pdu-${ENVIRONMENT}-values.yaml"
+    - helm repo add --username gitlab-ci-token --password $CI_JOB_TOKEN hcs-helm-charts ${CI_API_V4_URL}/projects/3913/packages/helm/stable
+    - helm repo update
+    - helm template "hcs-helm-charts/generic-service" --version=${GENERIC_SERVICE_HELM_CHART_VERSION} --values="values/${VALUES_FILE}" --debug | kube-score score -
+
+.push-to-ecr: &push-to-ecr
+  image: nexus.nonprod.dwpcloud.uk/docker-releases-dwp-secure-development/secure-development/container-image-factory/skopeo:1.2.0@sha256:9dc9d4507457616ea93b52fbf99681f51ab8817a1007640d9e3817cd44199563
+  script:
+    - aws ecr get-login-password --region eu-west-2 | skopeo login --username AWS --password-stdin ${ACCOUNT_ID_EKS2}.dkr.ecr.eu-west-2.amazonaws.com
+    - |
+      set -eu
+      if [ "${DEPLOYMENT_PURPOSE:-committed}" = "application-pr" ]; then
+        IMAGE_TAG=${DEPLOYMENT_IMAGE_TAG}
+      else
+        case "${ENVIRONMENT}" in
+          dev) IMAGE_TAG=${DEV_IMAGE_TAG} ;;
+          test) IMAGE_TAG=${TEST_IMAGE_TAG} ;;
+          stage) IMAGE_TAG=${STAGE_IMAGE_TAG} ;;
+          prod) IMAGE_TAG=${PROD_IMAGE_TAG} ;;
+          *) echo "Committed image selection is not configured for ${ENVIRONMENT}."; exit 1 ;;
+        esac
+      fi
+
+      if [ -z "${IMAGE_TAG}" ]; then
+        echo "No committed image tag is configured for ${ENVIRONMENT}."
+        exit 1
+      fi
+
+      TARGET_IMAGE="${ECR_REPOSITORY}:${IMAGE_TAG}"
+      SOURCE_IMAGE=
+
+      case "${ENVIRONMENT}" in
+        stage|prod)
+          SOURCE_REGISTRIES=${NEXUS_RELEASE_DOCKER_REGISTRY}
+          ;;
+        dev|test)
+          if [ "${CI_PIPELINE_SOURCE}" = "merge_request_event" ]; then
+            SOURCE_REGISTRIES=${NEXUS_SNAPSHOT_DOCKER_REGISTRY}
+          elif [ "${CI_COMMIT_BRANCH:-}" = "main" ]; then
+            SOURCE_REGISTRIES=${NEXUS_RELEASE_DOCKER_REGISTRY}
+          elif [ -n "${CI_COMMIT_TAG:-}" ] && printf '%s\n' "${CI_COMMIT_TAG}" | grep -Eq '^release/'; then
+            SOURCE_REGISTRIES=${NEXUS_RELEASE_DOCKER_REGISTRY}
+          else
+            SOURCE_REGISTRIES=${NEXUS_SNAPSHOT_DOCKER_REGISTRY}
+          fi
+          ;;
+      esac
+
+      for SOURCE_REGISTRY in ${SOURCE_REGISTRIES}; do
+        CANDIDATE_IMAGE="${SOURCE_REGISTRY}/${NEXUS_IMAGE_PATH}:${IMAGE_TAG}"
+        set +e
+        INSPECT_OUTPUT=$(skopeo inspect "docker://${CANDIDATE_IMAGE}" 2>&1)
+        INSPECT_STATUS=$?
+        set -e
+
+        if [ "${INSPECT_STATUS}" -eq 0 ]; then
+          SOURCE_IMAGE=${CANDIDATE_IMAGE}
+          break
+        fi
+
+        if ! printf '%s\n' "${INSPECT_OUTPUT}" | grep -Eqi 'manifest unknown|name unknown|manifest .*not found|manifest does not exist'; then
+          printf '%s\n' "${INSPECT_OUTPUT}"
+          exit "${INSPECT_STATUS}"
+        fi
+      done
+
+      if [ -z "${SOURCE_IMAGE}" ]; then
+        echo "Image ${IMAGE_TAG} does not exist in the available Nexus repositories."
+        exit 1
+      fi
+
+      echo "Checking if image already exists in ECR: ${IMAGE_TAG}"
+      set +e
+      INSPECT_OUTPUT=$(skopeo inspect --format '{{.Digest}}' "docker://${TARGET_IMAGE}" 2>&1)
+      INSPECT_STATUS=$?
+      set -e
+
+      if [ "${INSPECT_STATUS}" -eq 0 ]; then
+        TARGET_DIGEST=$(printf '%s\n' "${INSPECT_OUTPUT}" | tail -n 1)
+        if ! printf '%s\n' "${TARGET_DIGEST}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+          echo "ECR returned an invalid scan digest for ${TARGET_IMAGE}."
+          exit 1
+        fi
+        echo "Image ${IMAGE_TAG} already exists in ECR - reusing it."
         {
-          "type": "opencollective",
-          "url": "https://opencollective.com/fastify"
-        }
-      ],
-      "license": "BSD-3-Clause"
-    },
-    "node_modules/fsevents": {
-      "version": "2.3.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/fsevents/-/fsevents-2.3.2.tgz",
-      "integrity": "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==",
-      "dev": true,
-      "hasInstallScript": true,
-      "license": "MIT",
-      "optional": true,
-      "os": [
-        "darwin"
-      ],
-      "engines": {
-        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+          echo "IMAGE_COPY_READY=true"
+          echo "IMAGE_COPY_RESULT=reused"
+          echo "COPIED_IMAGE_TAG=${IMAGE_TAG}"
+          echo "ECR_IMAGE_DIGEST=${TARGET_DIGEST}"
+        } > image-copy.env
+        exit 0
+      fi
+
+      if ! printf '%s\n' "${INSPECT_OUTPUT}" | grep -Eqi 'manifest unknown|name unknown|manifest .*not found|manifest does not exist'; then
+        printf '%s\n' "${INSPECT_OUTPUT}"
+        exit "${INSPECT_STATUS}"
+      fi
+
+      echo "Copying ${SOURCE_IMAGE} to ${TARGET_IMAGE}"
+      skopeo copy --override-arch=amd64 --override-os=linux "docker://${SOURCE_IMAGE}" "docker://${TARGET_IMAGE}"
+
+      TARGET_DIGEST=$(skopeo inspect --format '{{.Digest}}' "docker://${TARGET_IMAGE}")
+      if ! printf '%s\n' "${TARGET_DIGEST}" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+        echo "ECR returned an invalid scan digest for ${TARGET_IMAGE}."
+        exit 1
+      fi
+      {
+        echo "IMAGE_COPY_READY=true"
+        echo "IMAGE_COPY_RESULT=copied"
+        echo "COPIED_IMAGE_TAG=${IMAGE_TAG}"
+        echo "ECR_IMAGE_DIGEST=${TARGET_DIGEST}"
+      } > image-copy.env
+  artifacts:
+    reports:
+      dotenv: image-copy.env
+    paths:
+      - image-copy.env
+
+.scan-ecr-vulns: &scan-ecr-vulns
+  image: nexus.nonprod.dwpcloud.uk/docker/aws-cli/aws-cli:2.36.6@sha256:a9d9b72a496fd434172bef0a1cac0bf3812986184f9d3b3cbff65d6999e7c4f8
+  script:
+    - |
+      set -eu
+      if [ "${DEPLOYMENT_PURPOSE:-committed}" = "application-pr" ]; then
+        IMAGE_TAG=${DEPLOYMENT_IMAGE_TAG}
+      else
+        case "${ENVIRONMENT}" in
+          dev) IMAGE_TAG=${DEV_IMAGE_TAG} ;;
+          test) IMAGE_TAG=${TEST_IMAGE_TAG} ;;
+          stage) IMAGE_TAG=${STAGE_IMAGE_TAG} ;;
+          prod) IMAGE_TAG=${PROD_IMAGE_TAG} ;;
+          *) echo "Committed image selection is not configured for ${ENVIRONMENT}."; exit 1 ;;
+        esac
+      fi
+
+      if [ "${IMAGE_COPY_READY:-false}" != "true" ] || [ "${COPIED_IMAGE_TAG:-}" != "${IMAGE_TAG}" ]; then
+        echo "Image copy result is missing for ${IMAGE_TAG}."
+        exit 1
+      fi
+
+      SCAN_STATUS=
+      ATTEMPT=1
+      while [ "${ATTEMPT}" -le 12 ]; do
+        set +e
+        SCAN_STATUS=$(aws ecr describe-image-scan-findings \
+          --region eu-west-2 \
+          --repository-name "${ECR_REPOSITORY_NAME}" \
+          --image-id imageDigest="${ECR_IMAGE_DIGEST}" \
+          --query 'imageScanStatus.status' \
+          --output text 2>/dev/null)
+        SCAN_COMMAND_STATUS=$?
+        set -e
+
+        if [ "${SCAN_COMMAND_STATUS}" -eq 0 ] && [ "${SCAN_STATUS}" = "COMPLETE" ]; then
+          break
+        fi
+
+        case "${SCAN_STATUS}" in
+          FAILED|UNSUPPORTED_IMAGE|SCAN_ELIGIBILITY_EXPIRED|FINDINGS_UNAVAILABLE|LIMIT_EXCEEDED)
+            echo "ECR scan failed with status ${SCAN_STATUS}."
+            exit 1
+            ;;
+        esac
+
+        if [ "${ATTEMPT}" -eq 12 ]; then
+          echo "ECR scan results were not available for ${IMAGE_TAG}."
+          exit 1
+        fi
+
+        echo "Waiting for ECR scan results for ${IMAGE_TAG}."
+        sleep 10s
+        ATTEMPT=$((ATTEMPT + 1))
+      done
+
+      CRITICAL_COUNT=$(aws ecr describe-image-scan-findings \
+      --region eu-west-2 \
+      --repository-name "${ECR_REPOSITORY_NAME}" \
+      --image-id imageDigest="${ECR_IMAGE_DIGEST}" \
+      --query "length(imageScanFindings.findings[?severity=='CRITICAL'])" \
+      --output text)
+      echo "CRITICAL vulnerabilities found: ${CRITICAL_COUNT}"
+      if [ "${CRITICAL_COUNT}" -gt 0 ]; then
+        printf '%s CRITICAL vulnerabilities detected - cannot deploy this service\n' "$CRITICAL_COUNT"
+        aws ecr describe-image-scan-findings \
+          --region eu-west-2 \
+          --repository-name "${ECR_REPOSITORY_NAME}" \
+          --image-id imageDigest="${ECR_IMAGE_DIGEST}" \
+          --query "[
+            imageScanFindings.findings[?severity=='CRITICAL'].[name,severity,uri],
+            imageScanFindings.findings[?severity=='HIGH'].[name,severity,uri]
+          ][]" \
+          --output table
+        exit 1
+      fi
+
+.docker-build-and-push-to-nexus: &docker-build-and-push-to-nexus
+  script:
+    - |
+      set -eu
+      if [ "${APP_CHANGED}" != "true" ]; then
+        echo "No image build inputs changed - skipping build."
+        echo "BUILT_IMAGE_DIGEST=" > built-image.env
+        exit 0
+      fi
+
+      echo "Using HCS runners, commencing docker startup checks"
+      for i in $(seq 1 30); do
+        docker info && break
+        echo "Waiting for docker to start"
+        sleep 1s
+      done
+
+      NEXUS_USER=$(jq -r '.username' "${SELECTED_NEXUS_CREDENTIAL_FILE}")
+      TOKEN=$(jq -r '.token' "${SELECTED_NEXUS_CREDENTIAL_FILE}")
+      echo "${TOKEN}" | docker login -u "${NEXUS_USER}" --password-stdin "${SELECTED_NEXUS_DOCKER_REGISTRY}"
+
+      cleanup() {
+        STATUS=$?
+        trap - EXIT INT TERM
+        docker logout "${SELECTED_NEXUS_DOCKER_REGISTRY}" > /dev/null 2>&1 || true
+        exit "${STATUS}"
       }
-    },
-    "node_modules/json-schema-traverse": {
-      "version": "1.0.0",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz",
-      "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==",
-      "dev": true,
-      "license": "MIT"
-    },
-    "node_modules/kafkajs": {
-      "version": "2.2.4",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/kafkajs/-/kafkajs-2.2.4.tgz",
-      "integrity": "sha512-j/YeapB1vfPT2iOIUn/vxdyKEuhuY2PxMBvf5JWux6iSaukAccrMtXEY/Lb7OvavDhOWME589bpLrEdnVHjfjA==",
-      "dev": true,
-      "license": "MIT",
-      "engines": {
-        "node": ">=14.0.0"
-      }
-    },
-    "node_modules/long": {
-      "version": "5.3.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/long/-/long-5.3.2.tgz",
-      "integrity": "sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==",
-      "dev": true,
-      "license": "Apache-2.0"
-    },
-    "node_modules/mappersmith": {
-      "version": "2.47.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/mappersmith/-/mappersmith-2.47.2.tgz",
-      "integrity": "sha512-7D62OkwQxuqHx8NNd0MmSchq7iKgP/b5i5qOv9mTZtfK9PCxTE0xKEDefwt8u8vfx4wB9XPSI2R+CtIEdNli7Q==",
-      "dev": true,
-      "license": "MIT",
-      "peerDependencies": {
-        "diff": "^7.0.0 || ^8.0.0 || ^9.0.0",
-        "tty-table": "^4.0.0 || ^5.0.0"
-      },
-      "peerDependenciesMeta": {
-        "diff": {
-          "optional": true
-        },
-        "tty-table": {
-          "optional": true
-        }
-      }
-    },
-    "node_modules/playwright": {
-      "version": "1.56.1",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/playwright/-/playwright-1.56.1.tgz",
-      "integrity": "sha512-aFi5B0WovBHTEvpM3DzXTUaeN6eN0qWnTkKx4NQaH4Wvcmc153PdaY2UBdSYKaGYw+UyWXSVyxDUg5DoPEttjw==",
-      "dev": true,
-      "license": "Apache-2.0",
-      "dependencies": {
-        "playwright-core": "1.56.1"
-      },
-      "bin": {
-        "playwright": "cli.js"
-      },
-      "engines": {
-        "node": ">=18"
-      },
-      "optionalDependencies": {
-        "fsevents": "2.3.2"
-      }
-    },
-    "node_modules/playwright-core": {
-      "version": "1.56.1",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/playwright-core/-/playwright-core-1.56.1.tgz",
-      "integrity": "sha512-hutraynyn31F+Bifme+Ps9Vq59hKuUCz7H1kDOcBs+2oGguKkWTU50bBWrtz34OUWmIwpBTWDxaRPXrIXkgvmQ==",
-      "dev": true,
-      "license": "Apache-2.0",
-      "bin": {
-        "playwright-core": "cli.js"
-      },
-      "engines": {
-        "node": ">=18"
-      }
-    },
-    "node_modules/protobufjs": {
-      "version": "7.6.6",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/protobufjs/-/protobufjs-7.6.6.tgz",
-      "integrity": "sha512-dYDWdjSl5RNb7SgPxGQcRU+GtvP7s2fpkrY0r432PcOIaZ0/rBcxEZnQN67iJhFuQiVw754JDoPruPCNdGsbjg==",
-      "dev": true,
-      "hasInstallScript": true,
-      "license": "BSD-3-Clause",
-      "dependencies": {
-        "@protobufjs/aspromise": "^1.1.2",
-        "@protobufjs/base64": "^1.1.2",
-        "@protobufjs/codegen": "^2.0.5",
-        "@protobufjs/eventemitter": "^1.1.1",
-        "@protobufjs/fetch": "^1.1.1",
-        "@protobufjs/float": "^1.0.2",
-        "@protobufjs/path": "^1.1.2",
-        "@protobufjs/pool": "^1.1.0",
-        "@protobufjs/utf8": "^1.1.1",
-        "@types/node": ">=13.7.0",
-        "long": "^5.3.2"
-      },
-      "engines": {
-        "node": ">=12.0.0"
-      }
-    },
-    "node_modules/require-from-string": {
-      "version": "2.0.2",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/require-from-string/-/require-from-string-2.0.2.tgz",
-      "integrity": "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==",
-      "dev": true,
-      "license": "MIT",
-      "engines": {
-        "node": ">=0.10.0"
-      }
-    },
-    "node_modules/typescript": {
-      "version": "5.9.3",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/typescript/-/typescript-5.9.3.tgz",
-      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
-      "dev": true,
-      "license": "Apache-2.0",
-      "bin": {
-        "tsc": "bin/tsc",
-        "tsserver": "bin/tsserver"
-      },
-      "engines": {
-        "node": ">=14.17"
-      }
-    },
-    "node_modules/undici-types": {
-      "version": "7.16.0",
-      "resolved": "https://nexus.nonprod.dwpcloud.uk/repository/npm/undici-types/-/undici-types-7.16.0.tgz",
-      "integrity": "sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==",
-      "dev": true,
-      "license": "MIT"
-    }
-  }
-}
+      trap cleanup EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+
+      IMAGE="${SELECTED_NEXUS_DOCKER_REGISTRY}/${NEXUS_IMAGE_PATH}:${SELECTED_IMAGE_TAG}"
+      set +e
+      PULL_OUTPUT=$(docker pull "${IMAGE}" 2>&1)
+      PULL_STATUS=$?
+      set -e
+
+      if [ "${PULL_STATUS}" -eq 0 ]; then
+        EXISTING_BUILD_INPUTS=$(docker inspect --format '{{ index .Config.Labels "uk.gov.dwp.raco.build-inputs" }}' "${IMAGE}")
+        EXISTING_SOURCE_REVISION=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE}")
+        DISPLAY_BUILD_INPUTS=${EXISTING_BUILD_INPUTS}
+        DISPLAY_SOURCE_REVISION=${EXISTING_SOURCE_REVISION}
+        if [ -z "${DISPLAY_BUILD_INPUTS}" ] || [ "${DISPLAY_BUILD_INPUTS}" = "<no value>" ]; then
+          DISPLAY_BUILD_INPUTS='<missing>'
+        fi
+        if [ -z "${DISPLAY_SOURCE_REVISION}" ] || [ "${DISPLAY_SOURCE_REVISION}" = "<no value>" ]; then
+          DISPLAY_SOURCE_REVISION='<missing>'
+        fi
+        echo "Expected build-input fingerprint: ${BUILD_INPUTS_DIGEST}"
+        echo "Existing build-input fingerprint: ${DISPLAY_BUILD_INPUTS}"
+        echo "Existing image source revision: ${DISPLAY_SOURCE_REVISION}"
+        if [ "${EXISTING_BUILD_INPUTS}" = "${BUILD_INPUTS_DIGEST}" ]; then
+          BUILT_IMAGE_DIGEST=$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE}" | sed 's/.*@//')
+          echo "BUILT_IMAGE_DIGEST=${BUILT_IMAGE_DIGEST}" > built-image.env
+          echo "Image ${SELECTED_IMAGE_TAG} already exists for these build inputs - reusing it."
+          exit 0
+        fi
+        echo "Image ${SELECTED_IMAGE_TAG} already exists for different build inputs."
+        exit 1
+      fi
+
+      MISSING_IMAGE=false
+      if printf '%s\n' "${PULL_OUTPUT}" | grep -Eqi 'manifest unknown|manifest .*not found|manifest does not exist'; then
+        MISSING_IMAGE=true
+      elif printf '%s\n' "${PULL_OUTPUT}" | grep -Fq 'failed to resolve reference' \
+        && printf '%s\n' "${PULL_OUTPUT}" | grep -Fq "${IMAGE}: not found"; then
+        MISSING_IMAGE=true
+      fi
+
+      if [ "${MISSING_IMAGE}" != "true" ]; then
+        printf '%s\n' "${PULL_OUTPUT}"
+        exit "${PULL_STATUS}"
+      fi
+
+      docker build --file "${DOCKER_BUILD_DOCKERFILE}" \
+        --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" \
+        --label "org.opencontainers.image.version=${SELECTED_IMAGE_TAG}" \
+        --label "uk.gov.dwp.raco.build-inputs=${BUILD_INPUTS_DIGEST}" \
+        -t "${IMAGE}" "${DOCKER_BUILD_CONTEXT}"
+      docker push "${IMAGE}"
+      docker pull "${IMAGE}"
+      BUILT_IMAGE_DIGEST=$(docker inspect --format '{{ index .RepoDigests 0 }}' "${IMAGE}" | sed 's/.*@//')
+      echo "BUILT_IMAGE_DIGEST=${BUILT_IMAGE_DIGEST}" > built-image.env
+  artifacts:
+    reports:
+      dotenv: built-image.env
+    paths:
+      - built-image.env
+
+.msa-render:
+  image: $CI_REGISTRY/dwp/engineering/images/ks8-tools:1.3.0@sha256:2b18ba539920bfb922c13f8b72aa8c31f015ffbb7eb0bf407b00df47109a8de3
+  script:
+    - |
+      set -eu
+
+      helm repo add \
+        --username gitlab-ci-token \
+        --password "${CI_JOB_TOKEN}" \
+        hcs-helm-charts \
+        "${CI_API_V4_URL}/projects/3913/packages/helm/stable"
+
+      helm repo update
+
+      mkdir -p "msa-rendered/${ENVIRONMENT}"
+
+      if [ "${DEPLOYMENT_PURPOSE:-committed}" = "application-pr" ]; then
+        helm template "${SERVICE_NAME}" \
+          hcs-helm-charts/generic-service \
+          --version "${GENERIC_SERVICE_HELM_CHART_VERSION}" \
+          --namespace "${NAMESPACE}" \
+          --values "values/pdu-${ENVIRONMENT}-values.yaml" \
+          --set-string deployment.containers.main.image.tag="${DEPLOYMENT_IMAGE_TAG}" \
+          --set-string deployment.containers.main.image.repository="${ECR_REPOSITORY}" \
+          > "msa-rendered/${ENVIRONMENT}/app.yaml"
+      else
+        helm template "${SERVICE_NAME}" \
+          hcs-helm-charts/generic-service \
+          --version "${GENERIC_SERVICE_HELM_CHART_VERSION}" \
+          --namespace "${NAMESPACE}" \
+          --values "values/pdu-${ENVIRONMENT}-values.yaml" \
+          > "msa-rendered/${ENVIRONMENT}/app.yaml"
+      fi
+
+      test -s "msa-rendered/${ENVIRONMENT}/app.yaml"
+  artifacts:
+    paths:
+      - msa-rendered/
+    expire_in: 7 days
 
 ```
